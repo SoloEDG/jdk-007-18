@@ -8,7 +8,9 @@ import {
   loadSession,
 } from "@/features/arrangement";
 import { createMixer } from "@/features/mixer";
+import { buildTopology } from "@/features/mixer/lib/topology";
 import type { NoteInput, Instrument, Session } from "@/shared/types";
+
 export function createStudio(notify: () => void) {
   const engine = createEngine(),
     transport = createTransport(),
@@ -34,8 +36,16 @@ export function createStudio(notify: () => void) {
       );
     }
   };
-  const syncMixer = () =>
-    mixer.ensure(arrangement.snapshot().tracks.map((t) => t.id));
+  const locked = () => recorder.snapshot().status !== "idle";
+  /** 把编排里的层级树同步成音频节点拓扑；播放中调用即平滑改接 */
+  const syncTopology = () => {
+    const data = arrangement.topologyData();
+    const groupIds = new Set(data.groups.map((g) => g.id));
+    mixer.setTopology(
+      buildTopology(data.groups, data.trackGroups, data.trackIds),
+      (id) => (groupIds.has(id) ? "group" : "track"),
+    );
+  };
   const cancelVoices = () => {
     engine.cancel();
     active.clear();
@@ -58,7 +68,7 @@ export function createStudio(notify: () => void) {
     const context = await engine.unlock();
     if (disposed) return false;
     mixer.attach(context);
-    syncMixer();
+    syncTopology();
     engine.route(mixer.channel);
     return true;
   };
@@ -103,7 +113,7 @@ export function createStudio(notify: () => void) {
     notify();
     try {
       if (!(await unlock()) || !active.has(id)) return;
-      const target = arrangement.selected();
+      const target = arrangement.selectedTrack();
       if (!target || target.instrument !== note.instrument) {
         active.delete(id);
         feedback("请先选择对应乐器的轨道");
@@ -133,11 +143,19 @@ export function createStudio(notify: () => void) {
     engine.release(id);
     notify();
   };
-  const install = (session: Session) => {
+  const install = (session: Session, warnings: string[] = []) => {
     stop();
     const valid = arrangement.restore(session);
     transport.configure(valid.bpm, valid.beats);
-    mixer.restore(valid.channels, valid.master);
+    const data = arrangement.topologyData();
+    mixer.restore(
+      valid.channels,
+      valid.groupsMix,
+      valid.master,
+      buildTopology(data.groups, data.trackGroups, data.trackIds),
+    );
+    if (warnings.length)
+      feedback(`恢复完成但有 ${warnings.length} 处归属缺失，已安全提升到根层级：${warnings.join("；")}`);
     notify();
   };
   const timer = window.setInterval(() => {
@@ -167,6 +185,7 @@ export function createStudio(notify: () => void) {
         transport: transport.view(now()),
         arrangement: arrangement.snapshot(),
         selected: arrangement.selected(),
+        selectedTrack: arrangement.selectedTrack(),
         recorder: recorder.snapshot(),
         mixer: mixer.snapshot(),
         active: new Set(active),
@@ -187,29 +206,68 @@ export function createStudio(notify: () => void) {
     add(kind: Instrument) {
       guard(() => {
         arrangement.add(kind);
-        syncMixer();
+        syncTopology();
       });
     },
-    select(id: string) {
-      if (recorder.snapshot().status !== "idle") return;
-      engine.releaseHeld();
-      active.clear();
-      arrangement.select(id);
+    addGroup(name?: string) {
+      guard(() => {
+        arrangement.addGroup(name);
+        syncTopology();
+      });
+    },
+    select(id: string, kind: "track" | "group") {
+      arrangement.select(id, kind);
+      if (kind === "track" && !locked()) {
+        engine.releaseHeld();
+        active.clear();
+      }
       notify();
+    },
+    renameGroup(id: string, name: string) {
+      guard(() => arrangement.renameGroup(id, name));
+    },
+    toggleCollapse(id: string) {
+      guard(() => arrangement.toggleCollapse(id));
+    },
+    moveTrack(trackId: string, groupId: string | null) {
+      guard(() => {
+        arrangement.moveTrack(trackId, groupId, locked());
+        syncTopology();
+        if (!locked())
+          message = groupId
+            ? "轨道已移入新编组，播放路径平滑切换"
+            : "轨道已移出编组，直连主输出";
+      });
+    },
+    reparentGroup(groupId: string, parentId: string | null) {
+      guard(() => {
+        arrangement.reparentGroup(groupId, parentId, locked());
+        syncTopology();
+      });
+    },
+    removeGroup(id: string, dissolve: boolean) {
+      guard(() => {
+        stop();
+        arrangement.removeGroup(id, dissolve, locked());
+        syncTopology();
+        message = dissolve
+          ? "编组已解散，子轨设置全部保留"
+          : "编组连同组内轨道已删除";
+      });
     },
     remove() {
       guard(() => {
-        const selected = arrangement.selected();
+        const selected = arrangement.selectedTrack();
         if (selected) {
           stop();
           arrangement.remove(selected.id);
-          syncMixer();
+          syncTopology();
         }
       });
     },
     clear() {
       guard(() => {
-        const t = arrangement.selected();
+        const t = arrangement.selectedTrack();
         if (t) {
           stop();
           arrangement.clear(t.id);
@@ -217,7 +275,7 @@ export function createStudio(notify: () => void) {
       });
     },
     async record() {
-      const selected = arrangement.selected();
+      const selected = arrangement.selectedTrack();
       if (!selected) return;
       const token = ++epoch;
       try {
@@ -252,40 +310,55 @@ export function createStudio(notify: () => void) {
       mixer.mute(id);
       notify();
     },
+    groupVolume(id: string, n: number) {
+      mixer.groupVolume(id, n);
+      notify();
+    },
+    groupMute(id: string) {
+      mixer.groupMute(id);
+      notify();
+    },
     master(n: number) {
       mixer.master(n);
       notify();
     },
     demo() {
       guard(() => {
-        install(demoSession());
+        const session = demoSession();
+        install(session);
         message = "示范已载入 · 点击播放，听听凌晨两点。";
       });
     },
     save() {
       guard(() => {
-        if (recorder.snapshot().status !== "idle")
+        if (locked())
           throw new Error("请完成或取消录音后再保存");
         const a = arrangement.snapshot(),
           t = transport.view(now()),
           m = mixer.snapshot();
-        saveSession({
-          version: 1,
+        const session: Session = {
+          version: 2,
           title: a.title,
           bpm: t.bpm,
           beats: t.beats,
           tracks: a.tracks,
+          groups: a.groups,
+          trackGroups: a.trackGroups,
           channels: m.channels,
+          groupsMix: m.groupsMix,
           master: m.master,
-        });
-        message = "作品已保存到本机浏览器";
+        };
+        saveSession(session);
+        message = "作品已保存到本机浏览器（含编组层级与各级混音）";
       });
     },
     load() {
       guard(() => {
         const session = loadSession();
-        install(session);
-        message = "本地作品已恢复";
+        install(session, session.warnings ?? []);
+        message = session.warnings?.length
+          ? message
+          : "本地作品已恢复（含编组层级）";
       });
     },
     dispose() {

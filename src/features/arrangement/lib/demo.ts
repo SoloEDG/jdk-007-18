@@ -1,21 +1,36 @@
 import type { Session, Note } from "@/shared/types";
+
 const note = (
   pitch: number,
   beat: number,
   duration = 0.18,
   velocity = 0.8,
 ): Note => ({ id: crypto.randomUUID(), pitch, beat, duration, velocity });
+
 export function demoSession(): Session {
   return {
-    version: 1,
+    version: 2,
     title: "凌晨两点 / After Hours",
     bpm: 108,
     beats: 16,
     master: 0.7,
+    groups: [
+      { id: "g-rhythm", name: "鼓组总线", parentId: null, collapsed: false },
+      { id: "g-harmony", name: "和声层", parentId: null, collapsed: false },
+    ],
+    trackGroups: {
+      rhythm: "g-rhythm",
+      chords: "g-harmony",
+      lead: null,
+    },
     channels: {
       rhythm: { volume: 0.8, muted: false },
       chords: { volume: 0.55, muted: false },
       lead: { volume: 0.55, muted: false },
+    },
+    groupsMix: {
+      "g-rhythm": { volume: 0.9, muted: false },
+      "g-harmony": { volume: 0.85, muted: false },
     },
     tracks: [
       {

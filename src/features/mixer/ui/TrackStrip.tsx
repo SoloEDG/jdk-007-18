@@ -1,24 +1,54 @@
 import type { Channel, Track } from "@/shared/types";
 import { decibels } from "../lib/levels";
-export function ChannelStrip({
+
+export function TrackStrip({
   track,
   channel,
+  depth,
+  badge,
+  running,
+  selected,
   volume,
   mute,
-  running,
+  select,
+  onDragStart,
+  onDragEnd,
 }: {
   track: Track;
   channel: Channel;
+  depth: number;
+  /** 折叠隐藏时由编组条代显的归属标记 */
+  badge?: string;
+  running: boolean;
+  selected: boolean;
   volume: (n: number) => void;
   mute: () => void;
-  running: boolean;
+  select: () => void;
+  onDragStart: () => void;
+  onDragEnd: () => void;
 }) {
   return (
-    <div className={`channel-strip ${channel.muted ? "muted" : ""}`}>
+    <div
+      className={`channel-strip track-strip ${channel.muted ? "muted" : ""} ${
+        selected ? "selected" : ""
+      }`}
+      style={{ marginLeft: depth * 18 }}
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData("text/plain", JSON.stringify({ kind: "track", id: track.id }));
+        e.dataTransfer.effectAllowed = "move";
+        onDragStart();
+      }}
+      onDragEnd={onDragEnd}
+    >
       <div className="strip-head">
-        <span className="color-dot" style={{ background: track.color }} />
-        <strong>{track.name}</strong>
+        <button className="strip-name" onClick={select} title={badge ?? track.name}>
+          <span className="color-dot" style={{ background: track.color }} />
+          <strong>{track.name}</strong>
+          {badge && <small className="group-badge">{badge}</small>}
+        </button>
         <button
+          className="mute-btn"
           onClick={mute}
           aria-label={`${channel.muted ? "取消静音" : "静音"} ${track.name}`}
           aria-pressed={channel.muted}

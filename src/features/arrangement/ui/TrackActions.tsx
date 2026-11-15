@@ -1,16 +1,21 @@
 import type { Instrument, Track } from "@/shared/types";
+
 export function TrackActions({
   selected,
   count,
+  groupCount,
   locked,
   add,
+  addGroup,
   remove,
   clear,
 }: {
   selected: Track | null;
   count: number;
+  groupCount: number;
   locked: boolean;
   add: (kind: Instrument) => void;
+  addGroup: () => void;
   remove: () => void;
   clear: () => void;
 }) {
@@ -22,7 +27,15 @@ export function TrackActions({
       <button disabled={locked || count >= 8} onClick={() => add("keys")}>
         ＋ 琴键轨道
       </button>
-      <span>{count} / 8 轨道</span>
+      <button
+        className="add-group-btn"
+        disabled={groupCount >= 16}
+        onClick={addGroup}
+        title="新建可折叠的轨道编组"
+      >
+        ＋ 编组
+      </button>
+      <span>{count} / 8 轨道 · {groupCount} 编组</span>
       <button
         disabled={locked || !selected || !selected.notes.length}
         onClick={clear}
